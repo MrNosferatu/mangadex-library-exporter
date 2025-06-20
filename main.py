@@ -7,6 +7,8 @@ from urllib.parse import urlencode, urlparse, parse_qs
 import xml.etree.ElementTree as ET
 import getpass
 import csv
+import xml.dom.minidom as minidom
+from requests.exceptions import RequestException, ConnectionError, Timeout, HTTPError
 
 MANGADEX_API = "https://api.mangadex.org"
 LOGIN_ENDPOINT = f"{MANGADEX_API}/auth/login"
@@ -16,8 +18,17 @@ MANGA_LIBRARY_ENDPOINT = f"{MANGADEX_API}/manga/status"
 SESSION_TOKENS = None
 
 def login(username: str, password: str) -> dict:
-    """Login to MangaDex and return the session tokens."""
-    resp = requests.post(LOGIN_ENDPOINT, json={"username": username, "password": password})
+    """Login to MangaDex and return the session tokens, or raise for invalid credentials."""
+    resp = request_with_retry('POST', LOGIN_ENDPOINT, json={"username": username, "password": password})
+    if resp.status_code == 401:
+        # Try to extract error message from response
+        try:
+            error_data = resp.json()
+            if error_data.get('result') == 'error':
+                detail = error_data.get('errors', [{}])[0].get('detail', 'Invalid credentials')
+                raise ValueError(f"Login failed: {detail}")
+        except Exception:
+            raise ValueError("Login failed: Invalid credentials (401)")
     resp.raise_for_status()
     return resp.json()
 
@@ -47,8 +58,15 @@ def ensure_valid_session():
         else:
             username = input("MangaDex Username: ")
             password = getpass.getpass("MangaDex Password: ")
-            tokens = login(username, password)
-            save_session(tokens)
+            try:
+                tokens = login(username, password)
+                save_session(tokens)
+            except ValueError as ve:
+                print(ve)
+                continue
+            except Exception as e:
+                print(f"Unexpected error: {e}")
+                continue
             continue
         try:
             # Try a lightweight request to check session
@@ -65,7 +83,7 @@ def ensure_valid_session():
 # --- MangaDex API ---
 def get_manga_library(session: requests.Session) -> dict:
     """Fetch the manga library (id and status) for the logged-in user."""
-    resp = session.get(MANGA_LIBRARY_ENDPOINT)
+    resp = request_with_retry('GET', MANGA_LIBRARY_ENDPOINT, headers=session.headers)
     resp.raise_for_status()
     data = resp.json()
     if data.get("result") != "ok":
@@ -84,7 +102,7 @@ def get_manga_info(session: requests.Session, manga_ids: list, status_map: dict 
             "contentRating[]": ["safe", "suggestive", "erotica", "pornographic"],
             "includes[]": ["cover_art", "artist", "author"]
         }
-        resp = session.get(f"{MANGADEX_API}/manga", params=params)
+        resp = request_with_retry('GET', f"{MANGADEX_API}/manga", params=params, headers=session.headers)
         resp.raise_for_status()
         data = resp.json().get("data", [])
         # Attach reading_status from status_map if provided
@@ -134,7 +152,8 @@ def export_unlisted_to_csv(unlisted, filename='export/unlisted_by_MAL.csv'):
             mal_id = links.get('mal', '-') if isinstance(links, dict) else '-'
             al_id = links.get('al', '-') if isinstance(links, dict) else '-'
             manga_type = manga.get('type', '').capitalize() if manga.get('type') else ''
-            title = attributes.get('title', {}).get('en', '')
+            title_dict = attributes.get('title', {})
+            title = title_dict.get('en') or next(iter(title_dict.values()), '')
             description = attributes.get('description', {}).get('en', '')
             orig_lang = iso6391_to_language(attributes.get('originalLanguage', ''))
             demographic = attributes.get('publicationDemographic', '')
@@ -195,7 +214,7 @@ def anilist_authorization_code_flow():
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
-    response = requests.post(token_url, json=data, headers=headers)
+    response = request_with_retry('POST', token_url, json=data, headers=headers)
     if response.status_code == 200:
         token = response.json().get("access_token")
         return token
@@ -258,8 +277,9 @@ def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml"):
             total_plantoread += 1
         manga_elem = ET.SubElement(root, "manga")
         ET.SubElement(manga_elem, "manga_mangadb_id").text = str(mal_id)
-        title = attributes.get('title', {}).get('en', '')
-        ET.SubElement(manga_elem, "manga_title").text = f"<![CDATA[{title}]]>"
+        title_dict = attributes.get('title', {})
+        title = title_dict.get('en') or next(iter(title_dict.values()), '')
+        ET.SubElement(manga_elem, "manga_title").text = title
         ET.SubElement(manga_elem, "manga_volumes").text = "0"
         ET.SubElement(manga_elem, "manga_chapters").text = "0"
         ET.SubElement(manga_elem, "my_id").text = "0"
@@ -267,14 +287,14 @@ def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml"):
         ET.SubElement(manga_elem, "my_read_chapters").text = "0"
         ET.SubElement(manga_elem, "my_start_date").text = "0000-00-00"
         ET.SubElement(manga_elem, "my_finish_date").text = "0000-00-00"
-        ET.SubElement(manga_elem, "my_scanalation_group").text = "<![CDATA[]]>"
+        ET.SubElement(manga_elem, "my_scanalation_group").text = ""
         ET.SubElement(manga_elem, "my_score").text = "0"
-        ET.SubElement(manga_elem, "my_storage").text = ""
+        ET.SubElement(manga_elem, "my_storage").text = " "
         ET.SubElement(manga_elem, "my_retail_volumes").text = "0"
         ET.SubElement(manga_elem, "my_status").text = status
-        ET.SubElement(manga_elem, "my_comments").text = "<![CDATA[]]>"
+        ET.SubElement(manga_elem, "my_comments").text = " "
         ET.SubElement(manga_elem, "my_times_read").text = "0"
-        ET.SubElement(manga_elem, "my_tags").text = "<![CDATA[]]>"
+        ET.SubElement(manga_elem, "my_tags").text = ""
         ET.SubElement(manga_elem, "my_priority").text = "Low"
         ET.SubElement(manga_elem, "my_reread_value").text = ""
         ET.SubElement(manga_elem, "my_rereading").text = "NO"
@@ -288,9 +308,45 @@ def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml"):
     ET.SubElement(myinfo, "user_total_dropped").text = str(total_dropped)
     ET.SubElement(myinfo, "user_total_plantoread").text = str(total_plantoread)
     tree = ET.ElementTree(root)
-    # Ensure the output directory exists
     os.makedirs(os.path.dirname(filename), exist_ok=True)
-    tree.write(filename, encoding="utf-8", xml_declaration=True)
+    # Write to a string first
+    import io
+    xml_bytes = io.BytesIO()
+    tree.write(xml_bytes, encoding="utf-8", xml_declaration=True)
+    xml_str = xml_bytes.getvalue().decode("utf-8")
+    # Parse with minidom and replace manga_title text with CDATA
+    dom = minidom.parseString(xml_str)
+    for elem in dom.getElementsByTagName("manga_title"):
+        text = elem.firstChild.nodeValue if elem.firstChild else ''
+        if elem.firstChild:
+            elem.removeChild(elem.firstChild)
+        cdata = dom.createCDATASection(text)
+        elem.appendChild(cdata)
+    for elem in dom.getElementsByTagName("my_scanalation_group"):
+        # Set nested CDATA for empty value
+        while elem.firstChild:
+            elem.removeChild(elem.firstChild)
+        cdata1 = dom.createCDATASection("<![CDATA[]]")
+        elem.appendChild(cdata1)
+        cdata2 = dom.createCDATASection(">")
+        elem.appendChild(cdata2)
+    for elem in dom.getElementsByTagName("my_comments"):
+        while elem.firstChild:
+            elem.removeChild(elem.firstChild)
+        cdata1 = dom.createCDATASection("<![CDATA[]]")
+        elem.appendChild(cdata1)
+        cdata2 = dom.createCDATASection(">")
+        elem.appendChild(cdata2)
+    for elem in dom.getElementsByTagName("my_tags"):
+        while elem.firstChild:
+            elem.removeChild(elem.firstChild)
+        cdata1 = dom.createCDATASection("<![CDATA[]]")
+        elem.appendChild(cdata1)
+        cdata2 = dom.createCDATASection(">")
+        elem.appendChild(cdata2)
+    # Write pretty xml to file
+    with open(filename, "w", encoding="utf-8") as f:
+        dom.writexml(f, encoding="utf-8")
     print(f"Exported {exported} manga to xml file. {not_found} Manga can't be exported because it doesnt have MAL id")
     # Ask user if they want to add unlisted manga with AL ID to AniList
     answer = input("Some manga might have AL ID. Do you want to add them to your AniList account? This requires an API Client. (y/n): ").strip().lower()
@@ -344,7 +400,8 @@ def sync_unlisted_to_anilist(unlisted):
             mapped_status = reading_status_map.get(raw_status, "CURRENT")
             variables = {"mediaId": int(al_id), "status": mapped_status}
             headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-            response = requests.post(
+            response = request_with_retry(
+                'POST',
                 "https://graphql.anilist.co",
                 json={"query": mutation, "variables": variables},
                 headers=headers
@@ -447,7 +504,8 @@ def export_manga_list_to_csv(manga_info_list, filename="manga_library.csv"):
             mal_id = links.get('mal', '-') if isinstance(links, dict) else '-'
             al_id = links.get('al', '-') if isinstance(links, dict) else '-'
             manga_type = manga.get('type', '').capitalize() if manga.get('type') else ''
-            title = attributes.get('title', {}).get('en', '')
+            title_dict = attributes.get('title', {})
+            title = title_dict.get('en') or next(iter(title_dict.values()), '')
             description = attributes.get('description', {}).get('en', '')
             orig_lang = iso6391_to_language(attributes.get('originalLanguage', ''))
             demographic = attributes.get('publicationDemographic', '')
@@ -471,6 +529,25 @@ def export_manga_list_to_csv(manga_info_list, filename="manga_library.csv"):
                 mal_id, al_id, manga_type, title, description, orig_lang, demographic, status, year, content_rating, tags, author, artist, reading_status
             ])
     print(f"Exported {len(manga_info_list)} manga to {filename}")
+
+def request_with_retry(method, url, max_retries=6, delay=10, **kwargs):
+    """Make a requests call with retry logic for network errors only."""
+    for attempt in range(max_retries):
+        try:
+            response = requests.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response
+        except (ConnectionError, Timeout) as e:
+            if attempt < max_retries - 1:
+                print(f"Request failed ({e}), retrying in {delay} seconds... [{attempt+1}/{max_retries}]")
+                time.sleep(delay)
+            else:
+                print(f"Request failed after {max_retries} attempts: {e}")
+                raise
+        except HTTPError as e:
+            # Do not retry on HTTP errors (like 401, 404, 500)
+            print(f"HTTP error: {e}")
+            raise
 
 # --- Main Menu ---
 def main():
