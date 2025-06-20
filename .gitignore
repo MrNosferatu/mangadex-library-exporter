@@ -1,0 +1,66 @@
+# Ignore the session file containing sensitive tokens
+/mangadex_session.json
+
+# Ignore the export directory and its contents
+/export/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installedFiles
+htmlcov/
+.tox/
+.nox/
+.venv/
+venv/
+ENV/
+env/
+POPO/
+.poetry/
+
+# pytest cache
+.pytest_cache/
+
+# mypy cache
+.mypy_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environments
+.env
+.env.*
+
+# Windows
+*.exe
+*.whl
+
+# macOS
+.DS_Store
+
+# Editors/IDEs
+.vscode/
+.idea/
+
+# Add any other files or directories you want to ignore here
