@@ -224,8 +224,8 @@ def anilist_authorization_code_flow():
     
 
 def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml"):
-    user_id = "00000000"
-    user_name = "YourName"
+    user_id = ""
+    user_name = ""
     total = 0
     total_reading = 0
     total_completed = 0
@@ -322,28 +322,6 @@ def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml"):
             elem.removeChild(elem.firstChild)
         cdata = dom.createCDATASection(text)
         elem.appendChild(cdata)
-    for elem in dom.getElementsByTagName("my_scanalation_group"):
-        # Set nested CDATA for empty value
-        while elem.firstChild:
-            elem.removeChild(elem.firstChild)
-        cdata1 = dom.createCDATASection("<![CDATA[]]")
-        elem.appendChild(cdata1)
-        cdata2 = dom.createCDATASection(">")
-        elem.appendChild(cdata2)
-    for elem in dom.getElementsByTagName("my_comments"):
-        while elem.firstChild:
-            elem.removeChild(elem.firstChild)
-        cdata1 = dom.createCDATASection("<![CDATA[]]")
-        elem.appendChild(cdata1)
-        cdata2 = dom.createCDATASection(">")
-        elem.appendChild(cdata2)
-    for elem in dom.getElementsByTagName("my_tags"):
-        while elem.firstChild:
-            elem.removeChild(elem.firstChild)
-        cdata1 = dom.createCDATASection("<![CDATA[]]")
-        elem.appendChild(cdata1)
-        cdata2 = dom.createCDATASection(">")
-        elem.appendChild(cdata2)
     # Write pretty xml to file
     with open(filename, "w", encoding="utf-8") as f:
         dom.writexml(f, encoding="utf-8")
