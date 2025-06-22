@@ -125,7 +125,7 @@ def get_manga_info(session: requests.Session, manga_ids: list, status_map: dict 
         TimeRemainingColumn(),
         transient=True,
     ) as progress:
-        manga_task = progress.add_task("Fetching manga...", total=total_manga)
+        manga_task = progress.add_task("Processing manga...", total=total_manga)
         processed = 0
         def fetch_chapter_list(manga_id, user_language, read_chapter_ids, session):
             params = {
@@ -190,8 +190,8 @@ def get_manga_info(session: requests.Session, manga_ids: list, status_map: dict 
                     skip_chapter_fetch = False
                     if not read_chapter_ids:
                         chapters = []
-                        manga['read_chapter'] = 0
-                        manga['read_volume'] = 0
+                        manga['read_chapter'] = "0"
+                        manga['read_volume'] = "0"
                         skip_chapter_fetch = True
                     if not skip_chapter_fetch:
                         futures.append((manga, executor.submit(fetch_chapter_list, manga_id, user_language, read_chapter_ids, session)))
@@ -215,26 +215,11 @@ def get_manga_info(session: requests.Session, manga_ids: list, status_map: dict 
                     if chapters:
                         max_chapter = max(chapters, key=parse_chapter_num)
                         max_volume = max(chapters, key=parse_volume_num)
-                        max_chap_val = parse_chapter_num(max_chapter)
-                        max_vol_val = parse_volume_num(max_volume)
-                        # Store as int if whole number, else as float string
-                        def is_whole_number(val):
-                            if isinstance(val, int):
-                                return True
-                            elif isinstance(val, float):
-                                return val.is_integer()
-                            return False
-                        if is_whole_number(max_chap_val):
-                            manga['read_chapter'] = str(int(max_chap_val))
-                        else:
-                            manga['read_chapter'] = str(max_chap_val)
-                        if is_whole_number(max_vol_val):
-                            manga['read_volume'] = str(int(max_vol_val))
-                        else:
-                            manga['read_volume'] = str(max_vol_val)
+                        manga['read_chapter'] = str(max(parse_chapter_num(max_chapter), 0))
+                        manga['read_volume'] = str(max(parse_volume_num(max_volume), 0))
                     else:
-                        manga['read_chapter'] = 0
-                        manga['read_volume'] = 0
+                        manga['read_chapter'] = "0"
+                        manga['read_volume'] = "0"
                     # Use batch ratings
                     manga_id = manga.get("id")
                     rating_info = ratings_map.get(manga_id)
@@ -254,7 +239,7 @@ def fetch_and_prepare_manga_info(session):
     return manga_info
 
 # --- Export Functions ---
-def export_unlinked_to_json(unlinked, filename='export/unlinked_to_MAL.json'):
+def export_unlinked_to_json(unlinked, filename='export/unlinked_by_MAL.json'):
     # Ensure the output directory exists
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     with open(filename, "w", encoding="utf-8") as f:
@@ -262,9 +247,9 @@ def export_unlinked_to_json(unlinked, filename='export/unlinked_to_MAL.json'):
     print(f"Exported {len(unlinked)} manga to {filename} (no MAL id)")
 
 
-def export_unlinked_to_csv(unlinked, filename='export/unlinked_to_MAL.csv'):
+def export_unlinked_to_csv(unlinked, filename='export/unlinked_by_MAL.csv'):
     columns = [
-        "MAL Id", "AL Id", "Type", "Title", "Description", "Original Language", "Demographic", "Status", "Year", "Content Rating", "Tags", "Author", "Artist", "Reading Status", "Read Chapters", "Read Volumes", "User Rating"
+        "MAL Id", "AL Id", "Type", "Title", "Description", "Original Language", "Demographic", "Status", "Year", "Content Rating", "Tags", "Author", "Artist", "Reading Status"
     ]
     reading_status_map = {
         "reading": "Reading",
@@ -305,11 +290,8 @@ def export_unlinked_to_csv(unlinked, filename='export/unlinked_to_MAL.csv'):
                     artist = rel.get('attributes', {}).get('name', artist)
             reading_status_raw = manga.get('reading_status', attributes.get('reading_status', ''))
             reading_status = reading_status_map.get(reading_status_raw, reading_status_raw.capitalize() if reading_status_raw else '')
-            read_chapter = manga.get('read_chapter', '0')
-            read_volume = manga.get('read_volume', '0')
-            user_rating = manga.get('user_rating', '-')
             writer.writerow([
-                mal_id, al_id, manga_type, title, description, orig_lang, demographic, status, year, content_rating, tags, author, artist, reading_status, read_chapter, read_volume, user_rating
+                mal_id, al_id, manga_type, title, description, orig_lang, demographic, status, year, content_rating, tags, author, artist, reading_status
             ])
     print(f"Exported {len(unlinked)} manga to {filename}")
 
@@ -461,16 +443,16 @@ def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml", session=
     # Write pretty xml to file
     with open(filename, "w", encoding="utf-8") as f:
         dom.writexml(f, encoding="utf-8")
-    print(f"Exported {exported} manga to xml file. {not_found} Manga can't be exported because it doesnt have MAL id")
+    print(f"Exported {exported} manga to xml file.")
     # Ask user if they want to add unlinked manga with AL ID to AniList
     answer = input("Some manga might have AL ID. Do you want to add them to your AniList account? This requires an API Client. (y/n): ").strip().lower()
     if answer == 'y':
         sync_to_anilist(unlinked)
     elif answer == 'n':
-        export_unlinked_to_csv(unlinked, filename='export/unlinked_to_MAL.csv')
+        export_unlinked_to_csv(unlinked, filename='export/unlinked_by_MAL.csv')
     else:
         print("Invalid input. unlinked manga will not be added to AniList.")
-        export_unlinked_to_csv(unlinked, filename='export/unlinked_to_MAL.csv')
+        export_unlinked_to_csv(unlinked, filename='export/unlinked_by_MAL.csv')
 
 
 def sync_to_anilist(mangas):
@@ -492,8 +474,7 @@ def sync_to_anilist(mangas):
             manga_without_al_id.append(manga)
     if manga_with_al_id:
         access_token = anilist_authorization_code_flow()
-        from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TaskProgressColumn, MofNCompleteColumn, TimeElapsedColumn, TimeRemainingColumn
-        print()
+        print(f"\nAdding {len(manga_with_al_id)} manga to AniList...")
         with Progress(
             SpinnerColumn(),
             TextColumn("{task.description}"),
@@ -504,7 +485,7 @@ def sync_to_anilist(mangas):
             TimeRemainingColumn(),
             transient=True,
         ) as progress:
-            task = progress.add_task(f"Adding manga to AniList...", total=len(manga_with_al_id))
+            task = progress.add_task("Adding manga to AniList...", total=len(manga_with_al_id))
             for manga in manga_with_al_id:
                 attributes = manga.get('attributes', {})
                 links = attributes.get('links')
@@ -514,7 +495,17 @@ def sync_to_anilist(mangas):
                 if not al_id:
                     progress.update(task, advance=1)
                     continue
-                mutation = '''\nmutation ($mediaId: Int!, $status: MediaListStatus, $progress: Int, $progressVolumes: Int, $score: Float) {\n  SaveMediaListEntry(mediaId: $mediaId, status: $status, progress: $progress, progressVolumes: $progressVolumes, score: $score) {\n    id\n    status\n    progress\n    progressVolumes\n    score\n  }\n}\n'''
+                mutation = '''
+mutation ($mediaId: Int!, $status: MediaListStatus, $score: Float, $progress: Int, $progressVolumes: Int) {
+  SaveMediaListEntry(mediaId: $mediaId, status: $status, score: $score, progress: $progress, progressVolumes: $progressVolumes) {
+    id
+    status
+    score
+    progress
+    progressVolumes
+  }
+}
+'''
                 reading_status_map = {
                     "reading": "CURRENT",
                     "completed": "COMPLETED",
@@ -557,8 +548,9 @@ def sync_to_anilist(mangas):
                     json={"query": mutation, "variables": variables},
                     headers=headers
                 )
-                time.sleep(2.1)
+                # Optionally, you can log failures to a file or list
                 progress.update(task, advance=1)
+                time.sleep(2.1)
         if manga_without_al_id:
             print(f"\n{len(manga_without_al_id)} manga without MAL or AL link will be exported to CSV.")
             export_unlinked_to_csv(manga_without_al_id, filename='export/unlinked.csv')
@@ -632,7 +624,7 @@ def export_manga_list(manga_info_list, export_format, filename, session=None):
 
 def export_manga_list_to_csv(manga_info_list, filename="manga_library.csv"):
     columns = [
-        "MAL Id", "AL Id", "Type", "Title", "Description", "Original Language", "Demographic", "Status", "Year", "Content Rating", "Tags", "Author", "Artist", "Reading Status", "Read Chapters", "Read Volumes", "User Rating"
+        "MAL Id", "AL Id", "Type", "Title", "Description", "Original Language", "Demographic", "Status", "Year", "Content Rating", "Tags", "Author", "Artist", "Reading Status"
     ]
     reading_status_map = {
         "reading": "Reading",
@@ -673,11 +665,8 @@ def export_manga_list_to_csv(manga_info_list, filename="manga_library.csv"):
                     artist = rel.get('attributes', {}).get('name', artist)
             reading_status_raw = manga.get('reading_status', attributes.get('reading_status', ''))
             reading_status = reading_status_map.get(reading_status_raw, reading_status_raw.capitalize() if reading_status_raw else '')
-            read_chapter = manga.get('read_chapter', '0')
-            read_volume = manga.get('read_volume', '0')
-            user_rating = manga.get('user_rating', '-')
             writer.writerow([
-                mal_id, al_id, manga_type, title, description, orig_lang, demographic, status, year, content_rating, tags, author, artist, reading_status, read_chapter, read_volume, user_rating
+                mal_id, al_id, manga_type, title, description, orig_lang, demographic, status, year, content_rating, tags, author, artist, reading_status
             ])
     print(f"Exported {len(manga_info_list)} manga to {filename}")
 
@@ -691,6 +680,7 @@ def request_with_retry(method, url, max_retries=6, delay=10, **kwargs):
                 # Try to re-login if credentials are available
                 credentials = load_credentials() if 'LOGIN_ENDPOINT' not in url else None
                 if credentials:
+                    print("Session expired (401). Attempting to re-login...")
                     username, password = credentials
                     try:
                         tokens = login(username, password)
@@ -714,40 +704,77 @@ def request_with_retry(method, url, max_retries=6, delay=10, **kwargs):
             return response
         except (ConnectionError, Timeout) as e:
             if attempt < max_retries - 1:
+                print(f"Request failed ({e}), retrying in {delay} seconds... [{attempt+1}/{max_retries}]")
                 time.sleep(delay)
             else:
                 print(f"Request failed after {max_retries} attempts: {e}")
                 raise
         except HTTPError as e:
-            # print(f"HTTP error: {e}")
+            print(f"HTTP error: {e}")
             raise
 
 # --- Main Menu ---
+def import_to_anilist_then_export(manga_info, session=None):
+    # Split manga by AL ID
+    manga_with_alid = []
+    manga_with_malid = []
+    manga_unlinked = []
+    for manga in manga_info:
+        attributes = manga.get('attributes', {})
+        links = attributes.get('links', {})
+        al_id = links.get('al') if isinstance(links, dict) else None
+        mal_id = links.get('mal') if isinstance(links, dict) else None
+        if al_id:
+            manga_with_alid.append(manga)
+        elif mal_id:
+            manga_with_malid.append(manga)
+        else:
+            manga_unlinked.append(manga)
+    # Add to AniList
+    if manga_with_alid:
+        sync_to_anilist(manga_with_alid)
+    # Export remaining
+    if manga_with_malid:
+        export_manga_list_to_xml(manga_with_malid, filename="export/manga_library.xml", session=session)
+    if manga_unlinked:
+        export_unlinked_to_csv(manga_unlinked, filename='export/unlinked.csv')
+
 def main():
     while True:
         print("Select export option:")
-        print("1. Export MAL XML")
-        print("2. Export JSON")
-        print("3. Export CSV")
-        print("4. Logout")
+        print("1. Import to AniList (Requires AniList API Client & take a long time)")
+        print("2. Export MAL XML")
+        print("3. Export JSON")
+        print("4. Export CSV")
+        print("5. Logout")
         print("q. Quit")
         choice = input("Choice (comma separated for multiple): ").strip()
         choices = [c.strip() for c in choice.split(',') if c.strip()]
-        valid_choices = {'1', '2', '3', '4', 'q'}
+        valid_choices = {'1', '2', '3', '4', '5', 'q'}
         if not all(c in valid_choices for c in choices):
             print("Invalid choice. Please try again.")
             continue
         if 'q' in choices:
             break
-        if '4' in choices:
+        if '5' in choices:
             global SESSION_TOKENS
             SESSION_TOKENS = None
             print("Logged out.")
             continue
-        if any(c in {'1', '2', '3'} for c in choices):
-            session, tokens = ensure_valid_session()
-            manga_info = fetch_and_prepare_manga_info(session)
+        # Warn about AniList API Client before fetching manga info
+        if '1' in choices:
+            print("\nWARNING: This function requires an AniList API Client (Client ID & Secret) and will take a long time due to rate limits.")
+            answer = input("Do you want to continue? (y/n): ").strip().lower()
+            if answer != 'y':
+                print("Returning to main menu.")
+                continue
+        session, tokens = ensure_valid_session()
+        manga_info = fetch_and_prepare_manga_info(session)
+        if '1' in choices:
+            import_to_anilist_then_export(manga_info, session=session)
+        if any(c in {'2', '3', '4'} for c in choices):
             export_all(manga_info, choices, session=session)
 
 if __name__ == "__main__":
     main()
+

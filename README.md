@@ -1,26 +1,30 @@
 # MangaDex Library Exporter
 
-A command-line tool to export your MangaDex manga library to various formats and optionally sync unlisted manga to AniList.
+A command-line tool to export your MangaDex manga library to various formats and optionally sync your manga to AniList to limited extent.
 
 ## Features
 - Export your MangaDex library to:
   - MyAnimeList (MAL) XML format
   - CSV format
   - JSON format
-- Identify manga without MAL or AniList IDs
-- Optionally add manga (with AniList ID) directly to your AniList account via the AniList API
+- Identify manga linked to MAL or AniList
+- Optionally add manga that linked to AniList directly to your AniList account via the AniList API
 - Handles AniList API authentication (Authorization Code Grant)
 - Rate-limits AniList API requests to avoid bans
 
 ## Requirements
 - Python 3.7+
-- `requests` library
+- Install dependencies from `requirements.txt`:
+
+  ```bash
+  pip install -r requirements.txt
+  ```
 
 ## Setup
 1. Clone or download this repository.
 2. Install dependencies:
    ```bash
-   pip install requests
+   pip install -r requirements.txt
    ```
 
 ## Usage
@@ -35,7 +39,7 @@ A command-line tool to export your MangaDex manga library to various formats and
    - `3`: Export CSV
    - `4`: Logout
    - `q`: Quit
-4. When exporting as MAL XML, it will export all manga without MAL ID into a seperate file and some of those manga might have AniList ID. If you choose to add those manga to your AniList Account, follow the instructions to authenticate and authorize the app.
+4. When exporting as MAL XML, it will export all manga unlinked to MAL but might be linked to AniList into a seperate file. If you choose to add those manga to your AniList Account, follow the instructions to authenticate and authorize the app.
 
 ## AniList API Authentication
 - You will be guided through the Authorization Code Grant flow.
@@ -46,13 +50,13 @@ A command-line tool to export your MangaDex manga library to various formats and
 - `export/manga_library.xml`: MAL XML export
 - `export/manga_library.csv`: CSV export
 - `export/manga_library.json`: JSON export
-- `export/unlisted_by_MAL.csv`: Manga without MAL ID but might still have  AniList ID
-- `export/unlisted_by_MAL_&_AL.csv`: Manga without MAL ID and AniList ID
+- `export/unlinked_to_MAL.csv`: Manga that are unlinked to MAL but might linked to AniList
+- `export/unlinked_to_MAL_&_AL.csv`: Manga that are unlinked to MAL and AniList
 
 ## Notes
 - Session is only valid for the duration of the script run (not saved to disk).
 - AniList API requests are rate-limited to 30 requests per minute.
-- Technically you can add all manga with AniList ID to your AniList account, but its more time efficient to import the MAL XML format via onsite importer because of the limited rate for AniList API.
+- Technically you can add all manga with AniList ID to your AniList account, but its more time efficient to import the MAL XML format via onsite importer because of the limited rate for AniList API. With 30 requests per minute, it can take a long time to add all manga, that's why the script only adds manga that are unlinked to MAL but might be linked to AniList.
 
 ## License
 MIT
