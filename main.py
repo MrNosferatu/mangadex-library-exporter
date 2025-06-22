@@ -50,12 +50,6 @@ def load_credentials():
     global SESSION_CREDENTIALS
     return SESSION_CREDENTIALS
 
-def refresh_session(session, tokens):
-    # Optionally implement token refresh if needed
-    # For now, just return the same session
-    return session, tokens
-
-
 def ensure_valid_session():
     """Ensure a valid MangaDex session, prompt for login if needed."""
     tokens = load_session()
@@ -384,12 +378,18 @@ def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml", session=
         "re_reading": "Reading"
     }
 
+    detected_al_id = False
     for manga in manga_info_list:
         mal_id = None
         attributes = manga.get('attributes', {})
         links = attributes.get('links')
+        
         if isinstance(links, dict):
             mal_id = links.get('mal')
+            al_id = links.get('al')
+        if al_id:
+            detected_al_id = True
+
         if not mal_id:
             not_found += 1
             unlinked.append(manga)
@@ -463,15 +463,16 @@ def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml", session=
         dom.writexml(f, encoding="utf-8")
     print(f"Exported {exported} manga to xml file. {not_found} Manga can't be exported because it doesnt have MAL id")
     # Ask user if they want to add unlinked manga with AL ID to AniList
-    answer = input("Some manga might have AL ID. Do you want to add them to your AniList account? This requires an API Client. (y/n): ").strip().lower()
-    if answer == 'y':
-        sync_to_anilist(unlinked)
-    elif answer == 'n':
-        export_unlinked_to_csv(unlinked, filename='export/unlinked_to_MAL.csv')
-    else:
-        print("Invalid input. unlinked manga will not be added to AniList.")
-        export_unlinked_to_csv(unlinked, filename='export/unlinked_to_MAL.csv')
-
+    if detected_al_id:
+        answer = input("Found manga that linked with AniList. Do you want to add them to your AniList account? This requires an API Client. (y/n): ").strip().lower()
+        if answer == 'y':
+            sync_to_anilist(unlinked)
+        elif answer == 'n':
+            export_unlinked_to_csv(unlinked, filename='export/unlinked_to_MAL.xml')
+        else:
+            print("Invalid input. unlinked manga will not be added to AniList.")
+            export_unlinked_to_csv(unlinked, filename='export/unlinked_to_MAL.xml')
+        
 
 def sync_to_anilist(mangas):
     """Sync manga with AL ID to AniList, rate-limited."""
@@ -722,32 +723,69 @@ def request_with_retry(method, url, max_retries=6, delay=10, **kwargs):
             # print(f"HTTP error: {e}")
             raise
 
+
+def sync_all_to_anilist_then_export_xml(manga_info_list, xml_filename="export/unlinked_to_AniList.xml"):
+    """Sync all manga with AniList ID to AniList, export the rest (no AL ID) to XML."""
+    manga_with_al_id = []
+    manga_without_al_id = []
+    for manga in manga_info_list:
+        attributes = manga.get('attributes', {})
+        links = attributes.get('links', {})
+        al_id = links.get('al') if isinstance(links, dict) else None
+        if al_id:
+            manga_with_al_id.append(manga)
+        else:
+            manga_without_al_id.append(manga)
+    if manga_with_al_id:
+        print(f"Syncing {len(manga_with_al_id)} manga to AniList...")
+        sync_to_anilist(manga_with_al_id)
+    else:
+        print("No manga with AniList ID found to sync.")
+    if manga_without_al_id:
+        print(f"Exporting {len(manga_without_al_id)} manga without AniList ID to XML: {xml_filename}")
+        export_manga_list_to_xml(manga_without_al_id, filename=xml_filename)
+    else:
+        print("All manga have AniList IDs, nothing to export to XML.")
+
+
 # --- Main Menu ---
 def main():
     while True:
         print("Select export option:")
-        print("1. Export MAL XML")
-        print("2. Export JSON")
-        print("3. Export CSV")
-        print("4. Logout")
+        print("1. Import to AniList (Requires AniList API Client & takes a long time)")
+        print("2. Export MAL XML")
+        print("3. Export JSON")
+        print("4. Export CSV")
+        print("5. Logout")
         print("q. Quit")
-        choice = input("Choice (comma separated for multiple): ").strip()
+        choice = input("Choice (comma separated for multiple, except option 1): ").strip()
         choices = [c.strip() for c in choice.split(',') if c.strip()]
-        valid_choices = {'1', '2', '3', '4', 'q'}
+        valid_choices = {'1', '2', '3', '4', '5', 'q'}
         if not all(c in valid_choices for c in choices):
             print("Invalid choice. Please try again.")
             continue
+        if '1' in choices and len(choices) > 1:
+            print("Option 1 (Import to AniList) cannot be used together with other options. Please select only option 1 or another option.")
+            continue
         if 'q' in choices:
             break
-        if '4' in choices:
+        if '5' in choices:
             global SESSION_TOKENS
             SESSION_TOKENS = None
             print("Logged out.")
             continue
-        if any(c in {'1', '2', '3'} for c in choices):
+        session, tokens = None, None
+        if any(c in {'1', '2', '3', '4'} for c in choices):
             session, tokens = ensure_valid_session()
             manga_info = fetch_and_prepare_manga_info(session)
-            export_all(manga_info, choices, session=session)
+        if '1' in choices:
+            sync_all_to_anilist_then_export_xml(manga_info)
+        if '2' in choices:
+            export_manga_list(manga_info, "xml", "export/manga_library.xml", session=session)
+        if '3' in choices:
+            export_manga_list(manga_info, "json", "export/manga_library.json")
+        if '4' in choices:
+            export_manga_list(manga_info, "csv", "export/manga_library.csv")
 
 if __name__ == "__main__":
     main()

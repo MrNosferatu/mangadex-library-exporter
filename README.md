@@ -50,8 +50,9 @@ A command-line tool to export your MangaDex manga library to various formats and
 - `export/manga_library.xml`: MAL XML export
 - `export/manga_library.csv`: CSV export
 - `export/manga_library.json`: JSON export
+- `export/unlinked_to_AniList.xml`: Manga that are unlinked to AniList
 - `export/unlinked_to_MAL.csv`: Manga that are unlinked to MAL but might linked to AniList
-- `export/unlinked_to_MAL_&_AL.csv`: Manga that are unlinked to MAL and AniList
+- `export/unlinked.csv`: Manga that are unlinked to MAL and AniList
 
 ## Notes
 - Session is only valid for the duration of the script run (not saved to disk).
