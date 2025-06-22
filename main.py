@@ -9,6 +9,8 @@ import getpass
 import csv
 import xml.dom.minidom as minidom
 from requests.exceptions import RequestException, ConnectionError, Timeout, HTTPError
+from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn, SpinnerColumn, TaskProgressColumn, MofNCompleteColumn
+import concurrent.futures
 
 MANGADEX_API = "https://api.mangadex.org"
 LOGIN_ENDPOINT = f"{MANGADEX_API}/auth/login"
@@ -16,6 +18,7 @@ MANGA_LIBRARY_ENDPOINT = f"{MANGADEX_API}/manga/status"
 
 # --- Session Management ---
 SESSION_TOKENS = None
+SESSION_CREDENTIALS = None  # Store (username, password) after first login
 
 def login(username: str, password: str) -> dict:
     """Login to MangaDex and return the session tokens, or raise for invalid credentials."""
@@ -33,13 +36,19 @@ def login(username: str, password: str) -> dict:
     return resp.json()
 
 
-def save_session(tokens):
-    global SESSION_TOKENS
+def save_session(tokens, credentials=None):
+    global SESSION_TOKENS, SESSION_CREDENTIALS
     SESSION_TOKENS = tokens
+    if credentials:
+        SESSION_CREDENTIALS = credentials
 
 def load_session():
     global SESSION_TOKENS
     return SESSION_TOKENS
+
+def load_credentials():
+    global SESSION_CREDENTIALS
+    return SESSION_CREDENTIALS
 
 def refresh_session(session, tokens):
     # Optionally implement token refresh if needed
@@ -60,7 +69,7 @@ def ensure_valid_session():
             password = getpass.getpass("MangaDex Password: ")
             try:
                 tokens = login(username, password)
-                save_session(tokens)
+                save_session(tokens, (username, password))
             except ValueError as ve:
                 print(ve)
                 continue
@@ -94,25 +103,133 @@ def get_manga_library(session: requests.Session) -> dict:
 def get_manga_info(session: requests.Session, manga_ids: list, status_map: dict = None) -> list:
     """Fetch manga info for a list of manga IDs (max 100 per request), and append reading_status if status_map is provided."""
     all_info = []
-    for i in range(0, len(manga_ids), 100):
-        batch = manga_ids[i:i+100]
-        params = {
-            "ids[]": batch,
-            "limit": 100,
-            "contentRating[]": ["safe", "suggestive", "erotica", "pornographic"],
-            "includes[]": ["cover_art", "artist", "author"]
-        }
-        resp = request_with_retry('GET', f"{MANGADEX_API}/manga", params=params, headers=session.headers)
+    # Fetch user language preferences
+    try:
+        resp = request_with_retry('GET', f'{MANGADEX_API}/settings', headers=session.headers)
         resp.raise_for_status()
-        data = resp.json().get("data", [])
-        # Attach reading_status from status_map if provided
-        if status_map:
-            for manga in data:
-                manga_id = manga.get("id")
-                if manga_id and manga_id in status_map:
-                    manga["reading_status"] = status_map[manga_id]
-        all_info.extend(data)
-        time.sleep(0.5)  # Be nice to the API
+        user_preferences = resp.json()
+        user_language = user_preferences.get('settings', {}).get('userPreferences', {}).get('filteredLanguages', [])
+    except Exception as e:
+        print(f"Failed to fetch user preferences: {e}")
+        user_language = ['en']  # Default to English if fetching fails
+    batch_size = 100
+    batches = [manga_ids[i:i+batch_size] for i in range(0, len(manga_ids), batch_size)]
+    total_manga = len(manga_ids)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        transient=True,
+    ) as progress:
+        manga_task = progress.add_task("Fetching manga...", total=total_manga)
+        processed = 0
+        def fetch_chapter_list(manga_id, user_language, read_chapter_ids, session):
+            params = {
+                'translatedLanguage[]': user_language,
+                'limit': 300,
+                'includes[]': ['scanlation_group', 'user'],
+                'order[volume]': 'desc',
+                'order[chapter]': 'desc',
+                'offset': 0,
+                'contentRating[]': ['safe', 'suggestive', 'erotica', 'pornographic'],
+                'includeUnavailable': 1
+            }
+            try:
+                resp = request_with_retry('GET', f'{MANGADEX_API}/manga/{manga_id}/feed', params=params, headers=session.headers)
+                chapter_data = resp.json()
+                chapters = [c for c in chapter_data['data'] if c['type'] == 'chapter' and c['id'] in read_chapter_ids]
+            except Exception as e:
+                print(f"Failed to fetch chapters for manga {manga_id}: {e}")
+                chapters = []
+            time.sleep(1)  # Cooldown for rate limit
+            return chapters
+        for batch in batches:
+            params = {
+                "ids[]": batch,
+                "limit": 100,
+                "contentRating[]": ["safe", "suggestive", "erotica", "pornographic"],
+                "includes[]": ["cover_art", "artist", "author"]
+            }
+            resp = request_with_retry('GET', f"{MANGADEX_API}/manga", params=params, headers=session.headers)
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+            # Batch fetch read chapter status for all manga in batch
+            read_status_map = {}
+            try:
+                resp_read = request_with_retry('GET', f'{MANGADEX_API}/manga/read', params={'ids[]': batch, 'grouped': 'true'}, headers=session.headers)
+                read_data = resp_read.json().get('data', {})
+                if isinstance(read_data, list):
+                    read_status_map = {}
+                else:
+                    read_status_map = read_data
+            except Exception as e:
+                print(f"Failed to batch fetch read chapters: {e}")
+                read_status_map = {}
+            # Batch fetch ratings for all manga in batch
+            ratings_map = {}
+            try:
+                rating_params = [("manga[]", mid) for mid in batch]
+                resp_rating = request_with_retry('GET', f'{MANGADEX_API}/rating', params=rating_params, headers=session.headers)
+                ratings_data = resp_rating.json().get('ratings', {})
+                ratings_map = ratings_data if isinstance(ratings_data, dict) else {}
+            except Exception as e:
+                print(f"Failed to batch fetch ratings: {e}")
+                ratings_map = {}
+            futures = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                for manga in data:
+                    manga_id = manga.get("id")
+                    if manga_id and manga_id in status_map:
+                        manga["reading_status"] = status_map[manga_id]
+                    read_chapter_ids = set(read_status_map.get(manga_id, []))
+                    chapters = []
+                    skip_chapter_fetch = False
+                    if not read_chapter_ids:
+                        chapters = []
+                        manga['read_chapter'] = "0"
+                        manga['read_volume'] = "0"
+                        skip_chapter_fetch = True
+                    if not skip_chapter_fetch:
+                        futures.append((manga, executor.submit(fetch_chapter_list, manga_id, user_language, read_chapter_ids, session)))
+                    else:
+                        # No chapters to fetch, update progress
+                        progress.update(manga_task, advance=1)
+                        processed += 1
+                for manga, future in futures:
+                    chapters = future.result()
+                    def parse_chapter_num(ch):
+                        try:
+                            return float(ch['attributes'].get('chapter') or 0)
+                        except Exception:
+                            return 0
+                    def parse_volume_num(ch):
+                        try:
+                            v = ch['attributes'].get('volume')
+                            return float(v) if v is not None else 0
+                        except Exception:
+                            return 0
+                    if chapters:
+                        max_chapter = max(chapters, key=parse_chapter_num)
+                        max_volume = max(chapters, key=parse_volume_num)
+                        manga['read_chapter'] = str(max(parse_chapter_num(max_chapter), 0))
+                        manga['read_volume'] = str(max(parse_volume_num(max_volume), 0))
+                    else:
+                        manga['read_chapter'] = "0"
+                        manga['read_volume'] = "0"
+                    # Use batch ratings
+                    manga_id = manga.get("id")
+                    rating_info = ratings_map.get(manga_id)
+                    if rating_info and 'rating' in rating_info:
+                        manga['user_rating'] = rating_info['rating']
+                    else:
+                        manga['user_rating'] = 0
+                    progress.update(manga_task, advance=1)
+                    processed += 1
+            all_info.extend(data)
     return all_info
 
 def fetch_and_prepare_manga_info(session):
@@ -122,15 +239,15 @@ def fetch_and_prepare_manga_info(session):
     return manga_info
 
 # --- Export Functions ---
-def export_unlisted_to_json(unlisted, filename='export/unlisted_by_MAL.json'):
+def export_unlinked_to_json(unlinked, filename='export/unlinked_to_MAL.json'):
     # Ensure the output directory exists
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     with open(filename, "w", encoding="utf-8") as f:
-        json.dump(unlisted, f, ensure_ascii=False, indent=2)
-    print(f"Exported {len(unlisted)} manga to {filename} (no MAL id)")
+        json.dump(unlinked, f, ensure_ascii=False, indent=2)
+    print(f"Exported {len(unlinked)} manga to {filename} (no MAL id)")
 
 
-def export_unlisted_to_csv(unlisted, filename='export/unlisted_by_MAL.csv'):
+def export_unlinked_to_csv(unlinked, filename='export/unlinked_to_MAL.csv'):
     columns = [
         "MAL Id", "AL Id", "Type", "Title", "Description", "Original Language", "Demographic", "Status", "Year", "Content Rating", "Tags", "Author", "Artist", "Reading Status"
     ]
@@ -146,7 +263,7 @@ def export_unlisted_to_csv(unlisted, filename='export/unlisted_by_MAL.csv'):
     with open(filename, "w", encoding="utf-8", newline='') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(columns)
-        for manga in unlisted:
+        for manga in unlinked:
             attributes = manga.get('attributes', {})
             links = attributes.get('links', {})
             mal_id = links.get('mal', '-') if isinstance(links, dict) else '-'
@@ -176,7 +293,7 @@ def export_unlisted_to_csv(unlisted, filename='export/unlisted_by_MAL.csv'):
             writer.writerow([
                 mal_id, al_id, manga_type, title, description, orig_lang, demographic, status, year, content_rating, tags, author, artist, reading_status
             ])
-    print(f"Exported {len(unlisted)} manga to {filename}")
+    print(f"Exported {len(unlinked)} manga to {filename}")
 
 
 def anilist_authorization_code_flow():
@@ -223,7 +340,7 @@ def anilist_authorization_code_flow():
         return None
     
 
-def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml"):
+def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml", session=None):
     user_id = ""
     user_name = ""
     total = 0
@@ -234,7 +351,7 @@ def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml"):
     total_plantoread = 0
     exported = 0
     not_found = 0
-    unlisted = []
+    unlinked = []
     root = ET.Element("myanimelist")
     myinfo = ET.SubElement(root, "myinfo")
     ET.SubElement(myinfo, "user_id").text = user_id
@@ -248,6 +365,7 @@ def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml"):
         "plan_to_read": "Plan to Read",
         "re_reading": "Reading"
     }
+
     for manga in manga_info_list:
         mal_id = None
         attributes = manga.get('attributes', {})
@@ -256,7 +374,7 @@ def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml"):
             mal_id = links.get('mal')
         if not mal_id:
             not_found += 1
-            unlisted.append(manga)
+            unlinked.append(manga)
             continue
         exported += 1
         # Use reading_status from manga if present, else default
@@ -283,12 +401,12 @@ def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml"):
         ET.SubElement(manga_elem, "manga_volumes").text = "0"
         ET.SubElement(manga_elem, "manga_chapters").text = "0"
         ET.SubElement(manga_elem, "my_id").text = "0"
-        ET.SubElement(manga_elem, "my_read_volumes").text = "0"
-        ET.SubElement(manga_elem, "my_read_chapters").text = "0"
+        ET.SubElement(manga_elem, "my_read_volumes").text = manga.get('read_volume', "0")
+        ET.SubElement(manga_elem, "my_read_chapters").text = manga.get('read_chapter', "0")
         ET.SubElement(manga_elem, "my_start_date").text = "0000-00-00"
         ET.SubElement(manga_elem, "my_finish_date").text = "0000-00-00"
         ET.SubElement(manga_elem, "my_scanalation_group").text = ""
-        ET.SubElement(manga_elem, "my_score").text = "0"
+        ET.SubElement(manga_elem, "my_score").text = str(manga.get('user_rating', "0"))     
         ET.SubElement(manga_elem, "my_storage").text = " "
         ET.SubElement(manga_elem, "my_retail_volumes").text = "0"
         ET.SubElement(manga_elem, "my_status").text = status
@@ -326,38 +444,38 @@ def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml"):
     with open(filename, "w", encoding="utf-8") as f:
         dom.writexml(f, encoding="utf-8")
     print(f"Exported {exported} manga to xml file. {not_found} Manga can't be exported because it doesnt have MAL id")
-    # Ask user if they want to add unlisted manga with AL ID to AniList
+    # Ask user if they want to add unlinked manga with AL ID to AniList
     answer = input("Some manga might have AL ID. Do you want to add them to your AniList account? This requires an API Client. (y/n): ").strip().lower()
     if answer == 'y':
-        sync_unlisted_to_anilist(unlisted)
+        sync_to_anilist(unlinked)
     elif answer == 'n':
-        export_unlisted_to_csv(unlisted, filename='export/unlisted_by_MAL.csv')
+        export_unlinked_to_csv(unlinked, filename='export/unlinked_to_MAL.csv')
     else:
-        print("Invalid input. Unlisted manga will not be added to AniList.")
-        export_unlisted_to_csv(unlisted, filename='export/unlisted_by_MAL.csv')
+        print("Invalid input. unlinked manga will not be added to AniList.")
+        export_unlinked_to_csv(unlinked, filename='export/unlinked_to_MAL.csv')
 
 
-def sync_unlisted_to_anilist(unlisted):
-    """Sync unlisted manga with AL ID to AniList, rate-limited."""
+def sync_to_anilist(mangas):
+    """Sync manga with AL ID to AniList, rate-limited."""
     print("To use the AniList API, you need an API Client.")
     print("1. Go to https://anilist.co/settings/developer and create a new application.")
     print("2. Set the redirect URL to https://anilist.co/api/v2/oauth/pin.")
-    unlisted_with_alid = []
-    unlisted_final = []
-    for manga in unlisted:
+    manga_with_al_id = []
+    manga_without_al_id = []
+    for manga in mangas:
         attributes = manga.get('attributes', {})
         links = attributes.get('links')
         al_id = None
         if isinstance(links, dict):
             al_id = links.get('al')
         if al_id:
-            unlisted_with_alid.append(manga)
+            manga_with_al_id.append(manga)
         else:
-            unlisted_final.append(manga)
-    if unlisted_with_alid:
+            manga_without_al_id.append(manga)
+    if manga_with_al_id:
         access_token = anilist_authorization_code_flow()
-        print(f"\nAdding {len(unlisted_with_alid)} manga to AniList...")
-        for manga in unlisted_with_alid:
+        print(f"\nAdding {len(manga_with_al_id)} manga to AniList...")
+        for manga in manga_with_al_id:
             attributes = manga.get('attributes', {})
             links = attributes.get('links')
             al_id = None
@@ -389,12 +507,12 @@ def sync_unlisted_to_anilist(unlisted):
             else:
                 print(f"Failed to add AL ID {al_id}: {response.text}")
             time.sleep(2.1)
-        if unlisted_final:
-            print(f"\n{len(unlisted_final)} manga without MAL or AL ID will be exported to CSV.")
-            export_unlisted_to_csv(unlisted_final, filename='export/unlisted_by_MAL_&_AL.csv')
+        if manga_without_al_id:
+            print(f"\n{len(manga_without_al_id)} manga without MAL or AL link will be exported to CSV.")
+            export_unlinked_to_csv(manga_without_al_id, filename='export/unlinked.csv')
     else:
-        print("No unlisted manga with AL ID found to add to AniList.")
-        export_unlisted_to_csv(unlisted, filename='export/unlisted_by_MAL.csv')
+        print("No manga linked with AniList found to add to AniList.")
+        export_unlinked_to_csv(mangas, filename='export/unlinked.csv')
 
 # --- Language Helper ---
 def iso6391_to_language(code):
@@ -439,18 +557,18 @@ def iso6391_to_language(code):
     return code
 
 # --- Export Orchestration ---
-def export_all(manga_info, choices):
+def export_all(manga_info, choices, session=None):
     if '1' in choices:
-        export_manga_list(manga_info, "xml", "export/manga_library.xml")
+        export_manga_list(manga_info, "xml", "export/manga_library.xml", session=session)
     if '2' in choices:
         export_manga_list(manga_info, "json", "export/manga_library.json")
     if '3' in choices:
         export_manga_list(manga_info, "csv", "export/manga_library.csv")
 
 # --- Export Dispatcher ---
-def export_manga_list(manga_info_list, export_format, filename):
+def export_manga_list(manga_info_list, export_format, filename, session=None):
     if export_format == "xml":
-        export_manga_list_to_xml(manga_info_list, filename)
+        export_manga_list_to_xml(manga_info_list, filename, session=session)
     elif export_format == "json":
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(manga_info_list, f, ensure_ascii=False, indent=2)
@@ -509,22 +627,44 @@ def export_manga_list_to_csv(manga_info_list, filename="manga_library.csv"):
     print(f"Exported {len(manga_info_list)} manga to {filename}")
 
 def request_with_retry(method, url, max_retries=6, delay=10, **kwargs):
-    """Make a requests call with retry logic for network errors only."""
+    """Make a requests call with retry logic for network errors and re-login on 401."""
+    global SESSION_TOKENS
     for attempt in range(max_retries):
         try:
             response = requests.request(method, url, **kwargs)
+            if response.status_code == 401:
+                # Try to re-login if credentials are available
+                credentials = load_credentials() if 'LOGIN_ENDPOINT' not in url else None
+                if credentials:
+                    username, password = credentials
+                    try:
+                        tokens = login(username, password)
+                        save_session(tokens, credentials)
+                        # Update Authorization header if present
+                        if 'headers' in kwargs and kwargs['headers']:
+                            kwargs['headers']['Authorization'] = f"Bearer {tokens['token']['session']}"
+                        else:
+                            kwargs['headers'] = {"Authorization": f"Bearer {tokens['token']['session']}"}
+                        # Retry the request once after re-login
+                        response = requests.request(method, url, **kwargs)
+                        response.raise_for_status()
+                        return response
+                    except Exception as e:
+                        print(f"Re-login failed: {e}")
+                        raise
+                else:
+                    print("401 Unauthorized and no credentials available for re-login.")
+                    response.raise_for_status()
             response.raise_for_status()
             return response
         except (ConnectionError, Timeout) as e:
             if attempt < max_retries - 1:
-                print(f"Request failed ({e}), retrying in {delay} seconds... [{attempt+1}/{max_retries}]")
                 time.sleep(delay)
             else:
                 print(f"Request failed after {max_retries} attempts: {e}")
                 raise
         except HTTPError as e:
-            # Do not retry on HTTP errors (like 401, 404, 500)
-            print(f"HTTP error: {e}")
+            # print(f"HTTP error: {e}")
             raise
 
 # --- Main Menu ---
@@ -552,7 +692,7 @@ def main():
         if any(c in {'1', '2', '3'} for c in choices):
             session, tokens = ensure_valid_session()
             manga_info = fetch_and_prepare_manga_info(session)
-            export_all(manga_info, choices)
+            export_all(manga_info, choices, session=session)
 
 if __name__ == "__main__":
     main()
