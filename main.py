@@ -419,8 +419,8 @@ def export_manga_list_to_xml(manga_info_list, filename="mangalist.xml", session=
         ET.SubElement(manga_elem, "manga_volumes").text = "0"
         ET.SubElement(manga_elem, "manga_chapters").text = "0"
         ET.SubElement(manga_elem, "my_id").text = "0"
-        ET.SubElement(manga_elem, "my_read_volumes").text = manga.get('read_volume', "0")
-        ET.SubElement(manga_elem, "my_read_chapters").text = manga.get('read_chapter', "0")
+        ET.SubElement(manga_elem, "my_read_volumes").text = str(manga.get('read_volume', 0) or "0")
+        ET.SubElement(manga_elem, "my_read_chapters").text = str(manga.get('read_chapter', 0) or "0")
         ET.SubElement(manga_elem, "my_start_date").text = "0000-00-00"
         ET.SubElement(manga_elem, "my_finish_date").text = "0000-00-00"
         ET.SubElement(manga_elem, "my_scanalation_group").text = ""
